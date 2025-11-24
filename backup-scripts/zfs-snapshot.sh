@@ -1,67 +1,51 @@
 #!/usr/bin/env bash
-#
-# zfs-snapshot.sh
-#
-# Simple helper to create ZFS snapshots for a given pool or dataset.
-# Snapshots are named like: <dataset>@auto-YYYYmmdd-HHMMSS
-#
-# Example:
-#   ./zfs-snapshot.sh tank/data
-#
-# Optional: set RETENTION_DAYS to automatically delete older snapshots.
-
 set -euo pipefail
 
-RETENTION_DAYS="${RETENTION_DAYS:-7}"   # default: keep 7 days of snapshots
+########################################
+# ZFS Snapshot Automation Script
+#
+# - Creates snapshots for one or more datasets
+# - Uses a simple naming convention: <dataset>@<prefix>-<timestamp>
+# - Deletes old snapshots based on a retention window (in days)
+#
+# Requirements:
+# - Linux with ZFS tools installed
+# - `date` with `-d` support (e.g. GNU date)
+########################################
 
-usage() {
-  echo "Usage: $0 <pool/dataset>"
-  echo
-  echo "Environment variables:"
-  echo "  RETENTION_DAYS   Number of days to keep snapshots (default: ${RETENTION_DAYS})"
-  exit 1
-}
+# --- Configuration ----------------------------------------------------------
 
-if [[ "${1-}" == "" ]]; then
-  usage
-fi
+# List of ZFS datasets to snapshot
+DATASETS=(
+  "tank/data"
+  "tank/vms"
+)
 
-DATASET="$1"
+# How many days snapshots should be kept
+RETENTION_DAYS=7
 
-# check if dataset exists
-if ! zfs list -H -o name "${DATASET}" >/dev/null 2>&1; then
-  echo "ERROR: ZFS dataset '${DATASET}' not found."
-  exit 1
-fi
+# Prefix for automatically created snapshots
+SNAPSHOT_PREFIX="auto"
 
-TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
-SNAP_NAME="${DATASET}@auto-${TIMESTAMP}"
+# --- Implementation ---------------------------------------------------------
 
-echo "Creating snapshot: ${SNAP_NAME}"
-zfs snapshot "${SNAP_NAME}"
+TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
 
-echo "Snapshot created."
+for dataset in "${DATASETS[@]}"; do
+    SNAPSHOT_NAME="${dataset}@${SNAPSHOT_PREFIX}-${TIMESTAMP}"
+    echo "[INFO] Creating snapshot: ${SNAPSHOT_NAME}"
+    zfs snapshot "${SNAPSHOT_NAME}"
 
-# cleanup old snapshots
-if [[ "${RETENTION_DAYS}" -gt 0 ]]; then
-  echo "Cleaning up snapshots older than ${RETENTION_DAYS} days for dataset ${DATASET}..."
-  zfs list -H -t snapshot -o name,creation -s creation | \
-    awk -v ds="${DATASET}" -v days="${RETENTION_DAYS}" '
-      $1 ~ "^"ds"@auto-" {
-        cmd = "date -d \""$2\" \"$3"\" +%s"
-        cmd | getline snap_ts
-        close(cmd)
+    echo "[INFO] Cleaning up old snapshots for dataset: ${dataset}"
+    # List snapshots for this dataset with the configured prefix, oldest first
+    zfs list -H -t snapshot -o name -s creation | grep "^${dataset}@${SNAPSHOT_PREFIX}-" | while read -r SNAP; do
+        CREATION_STR=$(zfs get -H -o value creation "$SNAP")
+        SNAP_TS=$(date -d "$CREATION_STR" +%s)
+        CUTOFF_TS=$(date -d "${RETENTION_DAYS} days ago" +%s)
 
-        now = systime()
-        age_days = (now - snap_ts) / 86400
-        if (age_days > days) {
-          print $1
-        }
-      }
-    ' | while read -r old_snap; do
-      echo "  Destroying old snapshot: ${old_snap}"
-      zfs destroy "${old_snap}"
+        if (( SNAP_TS < CUTOFF_TS )); then
+            echo "[CLEANUP] Destroying old snapshot: $SNAP"
+            zfs destroy "$SNAP"
+        fi
     done
-fi
-
-echo "Done."
+done
